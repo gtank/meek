@@ -1,0 +1,48 @@
+{
+	"version": 0,
+	"dependencies": [
+		{
+			"importpath": "git.torproject.org/pluggable-transports/goptlib.git",
+			"repository": "https://git.torproject.org/pluggable-transports/goptlib.git",
+			"vcs": "git",
+			"revision": "15d8df1cd780ddb0bb1710b08a5546f2a8f027bf",
+			"branch": "master",
+			"notests": true
+		},
+		{
+			"importpath": "github.com/rsc/letsencrypt",
+			"repository": "https://github.com/rsc/letsencrypt",
+			"vcs": "git",
+			"revision": "a019c9e6fce0c7132679dea13bd8df7c86ffe26c",
+			"branch": "master",
+			"notests": true
+		},
+		{
+			"importpath": "golang.org/x/crypto/ocsp",
+			"repository": "https://go.googlesource.com/crypto",
+			"vcs": "git",
+			"revision": "b6789ab629056511030d652d851e7dc10c9e9c9e",
+			"branch": "master",
+			"path": "/ocsp",
+			"notests": true
+		},
+		{
+			"importpath": "golang.org/x/net/context",
+			"repository": "https://go.googlesource.com/net",
+			"vcs": "git",
+			"revision": "ef00b378c73f107bf44d5c9b69875255ce89b79a",
+			"branch": "master",
+			"path": "/context",
+			"notests": true
+		},
+		{
+			"importpath": "golang.org/x/time/rate",
+			"repository": "https://go.googlesource.com/time",
+			"vcs": "git",
+			"revision": "a4bde12657593d5e90d0533a3e4fd95e635124cb",
+			"branch": "master",
+			"path": "/rate",
+			"notests": true
+		}
+	]
+}
