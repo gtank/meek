@@ -23,11 +23,13 @@ import (
 	"os/signal"
 	"path"
 	"runtime"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
 
-	"git.torproject.org/pluggable-transports/goptlib.git"
+	pt "git.torproject.org/pluggable-transports/goptlib.git"
+	"github.com/rsc/letsencrypt"
 )
 
 const (
@@ -263,7 +265,7 @@ func (state *State) ExpireSessions() {
 	}
 }
 
-func listenTLS(network string, addr *net.TCPAddr, certFilename, keyFilename string) (net.Listener, error) {
+func listenTLS(network string, addr *net.TCPAddr, certFilename, keyFilename string, manager *letsencrypt.Manager) (net.Listener, error) {
 	// This is cribbed from the source of net/http.Server.ListenAndServeTLS.
 	// We have to separate the Listen and Serve parts because we need to
 	// report the listening address before entering Serve (which is an
@@ -272,22 +274,27 @@ func listenTLS(network string, addr *net.TCPAddr, certFilename, keyFilename stri
 	config := &tls.Config{}
 	config.NextProtos = []string{"http/1.1"}
 
+	// Additionally disable SSLv3 because of the POODLE attack.
+	// http://googleonlinesecurity.blogspot.com/2014/10/this-poodle-bites-exploiting-ssl-30.html
+	// https://code.google.com/p/go/source/detail?r=ad9e191a51946e43f1abac8b6a2fefbf2291eea7
+	config.MinVersion = tls.VersionTLS10
+
 	var err error
-	config.Certificates = make([]tls.Certificate, 1)
-	config.Certificates[0], err = tls.LoadX509KeyPair(certFilename, keyFilename)
-	if err != nil {
-		return nil, err
+
+	if manager != nil {
+		config.GetCertificate = manager.GetCertificate
+	} else {
+		config.Certificates = make([]tls.Certificate, 1)
+		config.Certificates[0], err = tls.LoadX509KeyPair(certFilename, keyFilename)
+		if err != nil {
+			return nil, err
+		}
 	}
 
 	conn, err := net.ListenTCP(network, addr)
 	if err != nil {
 		return nil, err
 	}
-
-	// Additionally disable SSLv3 because of the POODLE attack.
-	// http://googleonlinesecurity.blogspot.com/2014/10/this-poodle-bites-exploiting-ssl-30.html
-	// https://code.google.com/p/go/source/detail?r=ad9e191a51946e43f1abac8b6a2fefbf2291eea7
-	config.MinVersion = tls.VersionTLS10
 
 	tlsListener := tls.NewListener(conn, config)
 
@@ -303,8 +310,8 @@ func startListener(network string, addr *net.TCPAddr) (net.Listener, error) {
 	return startServer(ln)
 }
 
-func startListenerTLS(network string, addr *net.TCPAddr, certFilename, keyFilename string) (net.Listener, error) {
-	ln, err := listenTLS(network, addr, certFilename, keyFilename)
+func startListenerTLS(network string, addr *net.TCPAddr, certFilename, keyFilename string, manager *letsencrypt.Manager) (net.Listener, error) {
+	ln, err := listenTLS(network, addr, certFilename, keyFilename, manager)
 	if err != nil {
 		return nil, err
 	}
@@ -335,13 +342,31 @@ func main() {
 	var certFilename, keyFilename string
 	var logFilename string
 	var port int
+	var useLetsEncrypt bool
+	var letsEncryptCacheFilename string
+	var letsEncryptHosts string
 
 	flag.BoolVar(&disableTLS, "disable-tls", false, "don't use HTTPS")
 	flag.StringVar(&certFilename, "cert", "", "TLS certificate file (required without --disable-tls)")
 	flag.StringVar(&keyFilename, "key", "", "TLS private key file (required without --disable-tls)")
 	flag.StringVar(&logFilename, "log", "", "name of log file")
 	flag.IntVar(&port, "port", 0, "port to listen on")
+	flag.BoolVar(&useLetsEncrypt, "lets-encrypt", false, "use Let's Encrypt to provision TLS")
+	flag.StringVar(&letsEncryptCacheFilename, "lets-encrypt-cache", "meek-certificates.cache", "Let's Encrypt cache file")
+	flag.StringVar(&letsEncryptHosts, "lets-encrypt-hosts", "", "optional comma-delimited whitelist of hostnames for which to request Let's Encrypt certificates")
 	flag.Parse()
+
+	var manager letsencrypt.Manager
+	if useLetsEncrypt {
+		if err := manager.CacheFile(letsEncryptCacheFilename); err != nil {
+			log.Fatalf("error initializing Let's Encrypt: %v", err)
+		}
+		if letsEncryptHosts != "" {
+			letsEncryptHosts = strings.TrimSpace(letsEncryptHosts)
+			hostnames := strings.Split(letsEncryptHosts, ",")
+			manager.SetHosts(hostnames)
+		}
+	}
 
 	if logFilename != "" {
 		f, err := os.OpenFile(logFilename, os.O_CREATE|os.O_APPEND|os.O_WRONLY, 0600)
@@ -353,12 +378,12 @@ func main() {
 	}
 
 	if disableTLS {
-		if certFilename != "" || keyFilename != "" {
-			log.Fatalf("The --cert and --key options are not allowed with --disable-tls.\n")
+		if certFilename != "" || keyFilename != "" || useLetsEncrypt {
+			log.Fatalf("The --cert, --key, and --lets-encrypt options are not allowed with --disable-tls.\n")
 		}
 	} else {
-		if certFilename == "" || keyFilename == "" {
-			log.Fatalf("The --cert and --key options are required.\n")
+		if (certFilename == "" || keyFilename == "") && !useLetsEncrypt {
+			log.Fatalf("The --cert and --key options are required unless using --lets-encrypt.\n")
 		}
 	}
 
@@ -380,7 +405,21 @@ func main() {
 			if disableTLS {
 				ln, err = startListener("tcp", bindaddr.Addr)
 			} else {
-				ln, err = startListenerTLS("tcp", bindaddr.Addr, certFilename, keyFilename)
+				if useLetsEncrypt {
+					// start the meek listener with the Let's Encrypt certificate function
+					ln, err = startListenerTLS("tcp", bindaddr.Addr, certFilename, keyFilename, &manager)
+
+					// and a dedicated Let's Encrypt challenge listener if necessary
+					if bindaddr.Addr.Port != 443 {
+						go func() {
+							log.Printf("Starting Let's Encrypt challenge listener")
+							manager.ServeHTTPS()
+						}()
+					}
+				} else {
+					// business as usual
+					ln, err = startListenerTLS("tcp", bindaddr.Addr, certFilename, keyFilename, nil)
+				}
 			}
 			if err != nil {
 				pt.SmethodError(bindaddr.MethodName, err.Error())
